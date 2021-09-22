@@ -1,0 +1,199 @@
+---
+title: "BOA Run Segment Google Trends Searches"
+author: "MM"
+date: "9/22/2021"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(echo = TRUE)
+``` 
+## Load required packages:
+```{r, message=FALSE, results="hide"}
+library(tinytex)
+library(gtrendsR)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(readr) 
+library(gtrendsR) 
+library(purrr) 
+```
+# Google Trends Keyword Data:
+- Normalized to the highest search volume for each keyword within the time frame analyzed
+- Search "interest" for each keyword scaled between 0 - 100
+- Valuable for interest in specific terms over time, but not really useful for comparing the absolute popularity of different search terms relative to one another
+
+## Pros & cons of using this scraping function in R vs. the Goole Trends interface:
+- Pro: Can scrape more than the Google-Trends-interface limit of 5 keywords
+- Con: Keywords are normalized to their own maximal popularity across the time frame analyzed, rather than normalized to all keywords in a given search
+
+## Write function to scrape data from Google Trends for list of keywords:
+```{r function, warning=FALSE}
+# The function wrap all the arguments of the gtrendR::trends function and return only the interest_over_time
+googleTrendsData <- function (keywords) { 
+  
+  # Set the geographic region, time span, etc.
+  country <- c("US") 
+  time <- ("2016-01-01 2021-09-21") 
+  channel <- 'web' 
+  
+  trends <- gtrends(keywords, 
+                   gprop = channel,
+                   geo = country,
+                   time = time ) 
+  
+  results <- trends$interest_over_time 
+  } 
+```
+
+## Load keywords list (.csv file):
+```{r kwlist}
+kwlist <- readLines("KWlist_BOARunning.csv")
+kwlist
+```
+
+## Run function on keywords list:
+```{r}
+# googleTrendsData function is executed over the kwlist
+output <- map_dfr(.x = kwlist,
+                  .f = googleTrendsData ) 
+
+# Download the dataframe "output" as a .csv file 
+write.csv(output, "BOARunning_Trends_US.csv")
+head(output)
+```
+
+
+## If data scraping was already performed, load CSV data for US or WORLD instead:
+```{r eval = FALSE}
+setwd('/Users/melissamazzo/Documents/Data Sets')
+  # US
+  output <- read.csv('BOARunning_Trends_US.csv')
+  output$date <- as.Date(output$date)
+  #World
+  output <- read.csv('BOARunning_Trends_WORLD.csv')
+  output$date <- as.Date(output$date)
+```
+
+## Extrapolate total 2021 searches based on Jan - Sept of 2021:
+```{r echo=TRUE}
+# Group data into monthwise
+monthdat <- output %>%
+  group_by(keyword,month = lubridate::floor_date(date, "month")) %>%
+  summarize(month_sum = sum(hits))
+
+monthdat$month <- month(monthdat$month)
+head(monthdat)
+```
+
+
+```{r}
+# Group data yearwise
+yeardat <- output %>%
+  group_by(keyword,year = lubridate::floor_date(date, "year")) %>%
+  summarize(year_sum = sum(hits))
+
+yeardat$year <- year(yeardat$year)
+head(yeardat)
+```
+
+## First, is the data for the remaining months (Oct, Nov, Dec) typically similar to the first 9 months of the year? 
+```{r}
+# Visualize data monthwise
+bykeyword <- ggplot(monthdat,aes(x=month,y=month_sum,color=keyword)) + geom_point(aes(fill=keyword)) +
+  scale_x_discrete(name ="Month", limits=c("1","2","3",'4','5','6','7','8','9','10','11','12')) +
+  geom_smooth(method="loess",aes(fill=keyword),alpha = 0.1) + theme(legend.position='none') +
+  scale_y_continuous("Total Hits per Month",limits = c(0, 100))
+
+total <- ggplot(monthdat,aes(x=month,y=month_sum)) + geom_point(aes(fill=keyword)) +
+  scale_x_discrete(name ="Month", limits=c("1","2","3",'4','5','6','7','8','9','10','11','12')) +
+  geom_smooth(method="loess",alpha = 0.5) + theme(legend.position='none') + 
+  scale_y_continuous("Total Hits per Month",limits = c(0, 100))
+
+grid.arrange(bykeyword,total,ncol=2)
+```
+
+```{r}
+# Split into two groups (before Sept & Sept and after)
+avgs <- monthdat %>%
+  group_by(month > 8)
+colnames(avgs) <- c("keyword", "month","month_sum","future")
+
+ggplot(avgs,aes(x=month>8,y=month_sum)) + geom_boxplot(outlier.alpha = 0.1,lwd=1,width=0.25) + geom_point(aes(color=keyword),position = position_jitterdodge(dodge.width=0.01,jitter.width = 0.2)) + theme(legend.position='none') + theme_classic() +   scale_x_discrete("Past vs. Future Months",labels = c("FALSE" = "Jan - Aug","TRUE" = "Sept - Dec")) + scale_y_continuous("Total Hits per Month")
+```
+
+```{r}
+# Test for a major difference with a linear regression
+summary(lm(data = avgs,formula = month_sum ~ future)) 
+  # No significant difference between past & future months
+```
+## How many days left in 2021?
+```{r}
+# t <- today()
+t <- as.Date("2021-09-21") # Date of Tableau dashboard creation
+s <- as.Date("2021-01-01")
+done <- t-s
+left <- 365-done
+  
+done <- as.numeric(done, units="days")
+left <- as.numeric(left, units="days")
+  
+# Extrapolate for rest of 2021 and add to 2021 data so far for each keyword
+extrap <- yeardat %>%
+  group_by(keyword) %>%
+  filter(year == 2021) %>%
+  mutate(year_sum = year_sum + ((year_sum/done)*left))
+
+extrap$year_sum <- round(extrap$year_sum) # Round to nearest integer
+head(extrap)
+```
+```{r}
+# Estimated total for 2021
+sum(extrap$year_sum)
+```
+
+## Possible next steps:
+- Extrapolate the number of hits anticipated for Oct, Nov and Dec for each keyword, using the trendlines created with previous years' data and the data for Jan - Sept of 2021
+- Investigate whether certain keywords have a cyclic trend across the months of a year (i.e., do searches for "BOA + trail" increase in summer or winter, or stay relatively constant across the year?)
+
+## Now let's examine searches for a specific shoe with and without BOA terms, the La Sportiva Cyklon:
+```{r warning=FALSE}
+# Load keywords list (.csv file) 
+setwd('/Users/melissamazzo/Documents/Data Sets')
+kwlist <- readLines("KWlist_BOACyklon.csv")
+ 
+# The function wrap all the arguments of the gtrendR::trends function and return only the interest_over_time
+googleTrendsData <- function (keywords) { 
+  
+  # Set the geographic region, time span, etc.
+  country <- c("") 
+  time <- ("2016-01-01 2021-09-21") 
+  channel <- 'web' 
+  
+  trends <- gtrends(keywords, 
+                   gprop = channel,
+                   geo = country,
+                   time = time ) 
+  
+  results <- trends$interest_over_time 
+  } 
+ 
+# googleTrendsData function is executed over the kwlist
+output <- map_dfr(.x = kwlist,
+                  .f = googleTrendsData ) 
+
+# Download the dataframe "output" as a .csv file 
+write.csv(output, "BOARunning_Cyklon.csv")
+```
+
+## If data scraping was already performed, load CSV data for Cyklon instead:
+```{r eval = FALSE}
+  # Cyklon
+  output <- read.csv('BOARunning_Trends_Cyklon.csv')
+  output$date <- as.Date(output$date)
+```
+
+## Connect Tableau workbook to CSV data sources
